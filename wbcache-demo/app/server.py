@@ -128,8 +128,54 @@ def start_flush():
         selected = [int(b) for b in selected]
     except (TypeError, ValueError) as exc:
         raise DiskError("selected block indices must be integers") from exc
+    # Optional fault injection for this round:
+    #   {"fault": {"block": 3, "bytes": 1024, "persistent": true}}
+    fault = body.get("fault")
+    if fault is not None:
+        if not isinstance(fault, dict):
+            raise DiskError("field 'fault' must be an object")
+        raw_block = fault.get("block")
+        if isinstance(raw_block, bool) or not isinstance(raw_block, int):
+            raise DiskError("fault.block must be an integer block index")
+        raw_bytes = fault.get("bytes")
+        if raw_bytes is not None and (
+            isinstance(raw_bytes, bool) or not isinstance(raw_bytes, int)
+        ):
+            raise DiskError("fault.bytes must be an integer")
+        disk.arm_short_write(
+            raw_block,
+            raw_bytes,
+            persistent=bool(fault.get("persistent", True)),
+        )
     session = disk.start_flush(selected)
     return jsonify({"ok": True, "flush": session, "state": disk.state()})
+
+
+@app.post("/api/fault/short-write")
+def arm_short_write():
+    body = request.get_json(force=True, silent=True) or {}
+    raw_block = body.get("block")
+    if isinstance(raw_block, bool) or not isinstance(raw_block, int):
+        raise DiskError("field 'block' must be an integer block index")
+    raw_bytes = body.get("bytes")
+    if raw_bytes is not None and (
+        isinstance(raw_bytes, bool) or not isinstance(raw_bytes, int)
+    ):
+        raise DiskError("field 'bytes' must be an integer")
+    return jsonify(
+        {
+            "ok": True,
+            "fault": disk.arm_short_write(
+                raw_block, raw_bytes, persistent=bool(body.get("persistent", True))
+            ),
+            "state": disk.state(),
+        }
+    )
+
+
+@app.post("/api/fault/clear")
+def clear_faults():
+    return jsonify({"ok": True, "fault": disk.clear_faults(), "state": disk.state()})
 
 
 @app.post("/api/flush/pause")

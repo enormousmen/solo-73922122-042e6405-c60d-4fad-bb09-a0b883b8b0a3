@@ -4,11 +4,13 @@ import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from app.disk import (
     BLOCK_SIZE,
     FLUSH_ABORTED,
     FLUSH_DONE,
+    FLUSH_FAILED,
     FLUSH_PAUSED,
     FLUSH_RUNNING,
     BlockError,
@@ -207,6 +209,196 @@ class WriteBackDiskTests(unittest.TestCase):
         final = wait_for(self.disk, {FLUSH_DONE})
         self.assertEqual(final["results"][0], "skipped-clean")
         self.assertEqual(final["results"][1], "skipped-clean")
+
+
+class ShortWriteTests(unittest.TestCase):
+    """A torn block write ends the round and must never corrupt the image."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.img = os.path.join(self.tmp.name, "disk.img")
+        self.disk = WriteBackDisk(self.img, block_count=8, flush_delay=0)
+
+    def read_image_block(self, block: int) -> bytes:
+        with open(self.img, "rb") as fh:
+            fh.seek(block * BLOCK_SIZE)
+            return fh.read(BLOCK_SIZE)
+
+    def test_short_write_ends_round_and_reports_failed_block(self):
+        for b in (0, 1, 2):
+            self.disk.write(b, payload(f"new-{b}"))
+        self.disk.arm_short_write(1, 1024, persistent=True)
+        self.disk.start_flush([0, 1, 2])
+
+        final = wait_for(self.disk, {FLUSH_FAILED})
+        self.assertEqual(final["status"], FLUSH_FAILED)
+        self.assertEqual(final["failed_block"], 1)
+        self.assertEqual(final["results"][0], "persisted")
+        self.assertEqual(final["results"][1], "failed-short-write")
+        self.assertNotIn(2, final["results"])  # round stops, block 2 untouched
+        self.assertEqual(final["cursor"], 1)
+
+        # already-flushed block keeps its platter value
+        self.assertEqual(self.disk.read(0)["source"], "platter")
+        self.assertEqual(self.disk.read(0)["data"], payload("new-0"))
+        # failed and unprocessed blocks keep their newest cache values
+        self.assertEqual(self.disk.read(1)["source"], "cache")
+        self.assertEqual(self.disk.read(1)["data"], payload("new-1"))
+        self.assertEqual(self.disk.read(2)["source"], "cache")
+        self.assertEqual(self.disk.read(2)["data"], payload("new-2"))
+
+    def test_failed_block_image_keeps_original_complete_value(self):
+        for b in (0, 1):
+            self.disk.write(b, payload(f"new-{b}"))
+        before = self.read_image_block(1)
+        self.disk.arm_short_write(1, 1536, persistent=True)
+        self.disk.start_flush([0, 1])
+        wait_for(self.disk, {FLUSH_FAILED})
+
+        # The torn write only touched the prefix; rollback leaves a complete,
+        # byte-identical original block in the image.
+        self.assertEqual(self.read_image_block(1), before)
+        self.assertTrue(before.startswith(b"INIT-BLOCK-01"))
+        self.assertIsNone(self.disk.state()["undo"])
+        # A restart (new object over the same image) reads the original value.
+        restarted = WriteBackDisk(self.img, block_count=8, flush_delay=0)
+        self.assertEqual(restarted.read(1)["data"], before)
+        self.assertEqual(restarted.read(1)["source"], "image")
+
+    def test_power_loss_after_short_write_keeps_original_value(self):
+        self.disk.write(1, payload("never-lands"))
+        before = self.read_image_block(1)
+        self.disk.arm_short_write(1, 2048, persistent=True)
+        self.disk.start_flush([1])
+        wait_for(self.disk, {FLUSH_FAILED})
+        self.disk.power_loss()
+
+        self.assertEqual(self.disk.read(1)["source"], "image")
+        self.assertEqual(self.disk.read(1)["data"], before)
+        restarted = WriteBackDisk(self.img, block_count=8, flush_delay=0)
+        self.assertEqual(restarted.read(1)["data"], before)
+
+    def test_retry_after_fault_cleared_persists_newest_cache_value(self):
+        self.disk.write(1, payload("v1"))
+        self.disk.arm_short_write(1, 512, persistent=True)
+        self.disk.start_flush([1])
+        wait_for(self.disk, {FLUSH_FAILED})
+        # the block is still dirty in cache with its newest value
+        st = self.disk.state()
+        self.assertTrue(st["blocks"][1]["dirty"])
+        self.assertTrue(st["blocks"][1]["failed"])
+        # still armed: a retry without clearing the fault fails again
+        self.disk.start_flush([1])
+        wait_for(self.disk, {FLUSH_FAILED})
+        self.disk.clear_faults()
+        self.disk.write(1, payload("v2"))  # newest cached value
+        self.disk.start_flush([1])
+        final = wait_for(self.disk, {FLUSH_DONE})
+        self.assertEqual(final["results"][1], "persisted")
+        self.assertEqual(self.disk.read(1)["source"], "platter")
+        self.assertEqual(self.read_image_block(1), payload("v2"))
+
+    def test_one_shot_fault_only_affects_one_attempt(self):
+        self.disk.write(1, payload("x"))
+        self.disk.arm_short_write(1, 100, persistent=False)
+        self.disk.start_flush([1])
+        wait_for(self.disk, {FLUSH_FAILED})
+        self.disk.start_flush([1])
+        final = wait_for(self.disk, {FLUSH_DONE})
+        self.assertEqual(final["results"][1], "persisted")
+
+    def test_unselected_dirty_blocks_survive_a_failed_round(self):
+        self.disk.write(0, payload("in-round"))
+        self.disk.write(1, payload("fails"))
+        self.disk.write(2, payload("not-selected"))
+        self.disk.arm_short_write(1, 256, persistent=True)
+        self.disk.start_flush([0, 1])
+        wait_for(self.disk, {FLUSH_FAILED})
+        self.assertEqual(self.disk.read(2)["source"], "cache")
+        self.assertEqual(self.disk.read(2)["data"], payload("not-selected"))
+        self.assertTrue(self.disk.state()["blocks"][2]["dirty"])
+
+    def test_image_layout_stays_four_kib_blocks(self):
+        before = os.path.getsize(self.img)
+        self.disk.write(1, payload("x"))
+        self.disk.arm_short_write(1, 512, persistent=True)
+        self.disk.start_flush([1])
+        wait_for(self.disk, {FLUSH_FAILED})
+        self.assertEqual(os.path.getsize(self.img), before)
+        self.assertEqual(before, 8 * BLOCK_SIZE)
+
+    def test_rollback_blocked_by_persistent_fault_uses_undo_journal(self):
+        self.disk.write(1, payload("new"))
+        before = self.read_image_block(1)
+        # Make the image itself permanently unwritable after the torn write, so
+        # the normal prefix rollback cannot run at all.
+        orig_write_prefix = self.disk._write_image_prefix
+
+        def failing_prefix(block, data):
+            raise OSError("media error")
+
+        self.disk._write_image_prefix = failing_prefix
+        self.disk.arm_short_write(1, 1024, persistent=True)
+        self.disk.start_flush([1])
+        final = wait_for(self.disk, {FLUSH_FAILED})
+        self.assertEqual(final["results"][1], "failed-short-write")
+        # the image is torn, but the journal holds the original block
+        undo = self.disk.state()["undo"]
+        self.assertEqual(undo["block"], 1)
+        # the newest value is still cached, so a read serves the cache first
+        self.assertEqual(self.disk.read(1)["source"], "cache")
+        self.assertEqual(self.disk.read(1)["data"], payload("new"))
+        # power loss clears the cache and tries to replay the journal; the
+        # media error blocks the replay, so reads fall back to the journal
+        self.disk.power_loss()
+        self.assertEqual(self.disk.read(1)["source"], "undo")
+        self.assertEqual(self.disk.read(1)["data"], before)
+        self.assertEqual(self.disk.state()["undo"]["block"], 1)
+        # A later power cycle, once the media works again, replays the journal
+        # and makes the image hold the original complete block again.
+        self.disk._write_image_prefix = orig_write_prefix
+        self.disk.power_loss()
+        self.assertIsNone(self.disk.state()["undo"])
+        self.assertEqual(self.read_image_block(1), before)
+        self.assertEqual(self.disk.read(1)["source"], "image")
+
+    def test_extra_io_per_block_is_constant_in_image_capacity(self):
+        def measure(block_count):
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            path = os.path.join(tmp.name, "disk.img")
+            disk = WriteBackDisk(path, block_count=block_count, flush_delay=0)
+            disk.write(0, payload("x"))
+            before = disk.io_stats()["total_bytes"]
+            disk.start_flush([0])
+            wait_for(disk, {FLUSH_DONE})
+            return disk.io_stats()["total_bytes"] - before
+
+        small = measure(8)
+        large = measure(2048)
+        self.assertEqual(small, large)
+        # constant: one old-block read + one undo write + one block write,
+        # plus the journal removal; independent of the number of blocks.
+        self.assertLessEqual(small, 4 * BLOCK_SIZE + 64)
+
+    def test_short_write_io_is_also_constant_in_capacity(self):
+        def measure(block_count):
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            path = os.path.join(tmp.name, "disk.img")
+            disk = WriteBackDisk(path, block_count=block_count, flush_delay=0)
+            disk.write(3, payload("torn"))
+            disk.arm_short_write(3, 777, persistent=False)
+            before = disk.io_stats()["total_bytes"]
+            disk.start_flush([3])
+            wait_for(disk, {FLUSH_FAILED})
+            return disk.io_stats()["total_bytes"] - before
+
+        small = measure(8)
+        large = measure(4096)
+        self.assertEqual(small, large)
+        self.assertLessEqual(small, 5 * BLOCK_SIZE + 64)
 
 
 if __name__ == "__main__":

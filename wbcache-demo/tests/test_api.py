@@ -138,6 +138,68 @@ class ApiTests(unittest.TestCase):
         resp = self.client.post("/api/flush", json={"selected": [0]})
         self.assertEqual(resp.status_code, 409)
 
+    def test_short_write_flow_over_http(self):
+        # write three dirty blocks, arm a short write on the middle one
+        self.post("/api/write", {"block": 0, "data": "b0-new", "pad": True})
+        self.post("/api/write", {"block": 1, "data": "b1-new", "pad": True})
+        self.post("/api/write", {"block": 2, "data": "b2-new", "pad": True})
+        armed = self.post("/api/fault/short-write",
+                          {"block": 1, "bytes": 1024, "persistent": False})
+        self.assertIn("1", armed["state"]["fault"]["short_write"])
+        bad = self.client.post("/api/fault/short-write", json={"block": "x"})
+        self.assertEqual(bad.status_code, 400)
+
+        started = self.post("/api/flush", {"selected": [0, 1, 2]})
+        self.assertEqual(started["flush"]["status"], "running")
+        for _ in range(200):
+            st = self.get("/api/state")["flush"]
+            if st["status"] in ("failed", "done", "aborted"):
+                break
+            time.sleep(0.02)
+        self.assertEqual(st["status"], "failed")
+        self.assertEqual(st["failed_block"], 1)
+        self.assertEqual(st["results"]["0"], "persisted")
+        self.assertEqual(st["results"]["1"], "failed-short-write")
+        self.assertNotIn("2", st["results"])
+
+        state = self.get("/api/state")
+        blocks = {b["block"]: b for b in state["blocks"]}
+        self.assertTrue(blocks[1]["dirty"] and blocks[1]["failed"])
+        self.assertTrue(blocks[2]["dirty"] and not blocks[2]["failed"])
+        self.assertFalse(blocks[0]["dirty"])
+
+        # the page can show the failed block and inject the fault
+        page = self.client.get("/").data
+        self.assertIn(b"/api/fault/short-write", page)
+        self.assertIn(b"failedLine", page)
+
+        # reads: block 0 from platter, failed/unprocessed blocks from cache
+        self.assertEqual(self.get("/api/read?block=0")["result"]["source"], "platter")
+        r1 = self.get("/api/read?block=1")["result"]
+        self.assertEqual(r1["source"], "cache")
+        self.assertTrue(r1["preview"].startswith("b1-new"))
+        r2 = self.get("/api/read?block=2")["result"]
+        self.assertEqual(r2["source"], "cache")
+        self.assertTrue(r2["preview"].startswith("b2-new"))
+
+        # simulate power loss: the image keeps block 1's original value
+        self.post("/api/power-loss")
+        r1 = self.get("/api/read?block=1")["result"]
+        self.assertEqual(r1["source"], "image")
+        self.assertIn("INIT", r1["preview"])
+        self.assertTrue(self.get("/api/read?block=0")["result"]["preview"].startswith("b0-new"))
+
+        # a fresh round is possible after the failure and fixes things
+        self.post("/api/write", {"block": 5, "data": "after-retry", "pad": True})
+        self.post("/api/flush", {"selected": [5]})
+        for _ in range(200):
+            st = self.get("/api/state")["flush"]
+            if st["status"] in ("failed", "done", "aborted"):
+                break
+            time.sleep(0.02)
+        self.assertEqual(st["status"], "done")
+        self.assertTrue(self.get("/api/read?block=5")["result"]["preview"].startswith("after-retry"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

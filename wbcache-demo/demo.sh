@@ -57,4 +57,33 @@ curl -fsS "$BASE/api/read?block=5" \
   | jget "'block5 -> '+d['result']['source']+' '+d['result']['preview'][:16]"
 curl -fsS "$BASE/api/read?block=3" \
   | jget "'block3 survived -> '+d['result']['preview'][:20]"
+
+echo "== 5. short write mid-round ends the round; image keeps the old block =="
+post /api/reset >/dev/null
+for b in 0 1 2 3; do
+  post /api/write "{\"block\":$b,\"data\":\"SW-B$b\",\"pad\":true}" >/dev/null
+done
+post /api/fault/short-write '{"block":2,"bytes":1000,"persistent":true}' >/dev/null
+post /api/flush '{"selected":[0,1,2,3]}' >/dev/null
+wait_until "f['status']=='failed'"
+curl -fsS "$BASE/api/state" \
+  | jget "'flush='+d['flush']['status']+' failed_block='+str(d['flush']['failed_block'])+' results='+str(d['flush']['results'])"
+for b in 0 1 2 3; do
+  curl -fsS "$BASE/api/read?block=$b" \
+    | jget "'block$b -> '+d['result']['source']+' '+d['result']['preview'][:12]"
+done
+echo "power loss, then the failed block must still read its original value:"
+post /api/power-loss >/dev/null
+curl -fsS "$BASE/api/read?block=2" \
+  | jget "'block2 after loss -> '+d['result']['source']+' '+d['result']['preview'][:16]"
+curl -fsS "$BASE/api/read?block=1" \
+  | jget "'block1 after loss -> '+d['result']['source']+' '+d['result']['preview'][:12]"
+echo "clear the fault and retry with the newest cached value:"
+post /api/fault/clear >/dev/null
+post /api/write '{"block":2,"data":"SW-B2-RETRY","pad":true}' >/dev/null
+post /api/flush '{"selected":[2]}' >/dev/null
+wait_until "f['status']=='done'"
+curl -fsS "$BASE/api/read?block=2" \
+  | jget "'block2 retried -> '+d['result']['source']+' '+d['result']['preview'][:12]"
+
 echo "ALL DEMO STEPS OK"

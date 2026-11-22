@@ -30,6 +30,9 @@
   .block.platter { border-left: 3px solid var(--platter); }
   .block.cache { border-left: 3px solid var(--cache); }
   .block.dirty .idx::after { content: " ●"; color: var(--danger); }
+  .block.failed { border-color: var(--danger); border-left-color: var(--danger); background: #2a1519; }
+  .block.failed .idx::after { content: " ✕"; color: var(--danger); }
+  .block.undo { border-left-color: var(--danger); }
   .block.selected { outline: 2px solid var(--accent); outline-offset: 1px; }
   .block.flushing { animation: pulse 0.9s infinite; }
   @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(79,140,255,.5);} 50% { box-shadow: 0 0 0 5px rgba(79,140,255,0);} }
@@ -37,6 +40,7 @@
   .legend span::before { content: "■"; margin-right: 4px; }
   .lg-image::before { color: var(--image);} .lg-platter::before { color: var(--platter);} .lg-cache::before { color: var(--cache);}
   .lg-dirty::before { color: var(--danger); }
+  .lg-failed::before { content: "✕"; color: var(--danger); }
   label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
   input[type=number], input[type=text], select, textarea {
     width: 100%; background: #101725; border: 1px solid var(--line); color: var(--text);
@@ -58,6 +62,7 @@
   .badge.running { background: #1d3a6b; color: #9ec1ff; }
   .badge.paused { background: #5a4318; color: #ffd48a; }
   .badge.done { background: #14452a; color: #86ecad; }
+  .badge.failed { background: #4d1c20; color: #ffa8ad; }
   .badge.aborted { background: #4d1c20; color: #ffa8ad; }
   .badge.idle { background: #26304a; color: var(--muted); }
   #events { max-height: 340px; overflow-y: auto; font-family: ui-monospace, "Menlo", monospace; font-size: 12px; }
@@ -66,6 +71,12 @@
   .ev.kind-persist { color: var(--ok); } .ev.kind-powerloss { color: var(--danger); }
   .ev.kind-flush-accept, .ev.kind-flush-done { color: #9ec1ff; }
   .ev.kind-flush-skip-stale { color: var(--warn); }
+  .ev.kind-flush-short-write, .ev.kind-flush-write-error, .ev.kind-flush-failed,
+  .ev.kind-flush-rollback, .ev.kind-flush-rollback-failed { color: var(--danger); }
+  .ev.kind-fault-arm { color: var(--warn); }
+  .failed-line { color: var(--danger); font-size: 12px; min-height: 16px; margin-top: 6px; }
+  .fault-box { border-top: 1px dashed var(--line); margin-top: 12px; padding-top: 10px; }
+  .fault-line { font-size: 12px; color: var(--warn); min-height: 16px; margin-top: 4px; }
   .readout { background: #101725; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
     font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; margin-top: 8px; }
   .muted { color: var(--muted); font-size: 12px; }
@@ -91,6 +102,7 @@
         <span class="lg-platter">已落盘（platter）</span>
         <span class="lg-cache">最新值在缓存</span>
         <span class="lg-dirty">脏块（缓存比盘新）</span>
+        <span class="lg-failed">失败块（✕ 本轮短写失败）</span>
       </div>
       <div class="sel-line" id="selLine"></div>
       <button class="ghost" id="btnDirty">全选脏块</button>
@@ -128,6 +140,7 @@
       <div>状态：<span class="badge idle" id="flushBadge">idle</span> <span class="muted" id="flushSeq"></span></div>
       <div class="progress"><div id="bar" style="width:0%"></div></div>
       <div class="muted" id="progressText">未开始</div>
+      <div class="failed-line" id="failedLine"></div>
       <div class="row">
         <button id="btnFlush">发起 FLUSH</button>
         <button class="warn" id="btnPause" disabled>暂停</button>
@@ -135,6 +148,29 @@
       </div>
       <div class="hint" style="margin-top:8px">
         受理时快照待刷块；受理后到达的普通写入不随本轮落盘。暂停期间发 <code>FUA</code> 可把指定块直接落盘，恢复时旧快照不会覆盖它。
+      </div>
+      <div class="fault-box">
+        <label>短写故障注入（下一轮 FLUSH 对指定块只写前半截后报错）</label>
+        <div class="row">
+          <div>
+            <label>故障块号</label>
+            <input type="number" id="faultBlk" min="0" max="{{ block_count - 1 }}" value="1">
+          </div>
+          <div>
+            <label>写入字节数（0–4095）</label>
+            <input type="number" id="faultBytes" min="0" max="4095" value="2048">
+          </div>
+        </div>
+        <div class="checks">
+          <label><input type="checkbox" id="faultPersist" checked> 故障持续到手动解除（重试仍失败）</label>
+        </div>
+        <div class="row">
+          <button class="warn" id="btnArmFault">布置短写</button>
+          <button class="ghost" id="btnClearFault">解除故障</button>
+        </div>
+        <div class="fault-line" id="faultLine"></div>
+        <div class="muted" id="ioLine" style="margin-top:6px"></div>
+        <div class="hint">短写只写了块的前半截：本轮立即结束，已刷完的块保留落盘值；失败块镜像里仍保住原值（回滚只重写被覆盖的前缀，或由 undo 日志兜底），掉电/重启后可读回。失败块与未刷块的最新值仍留在缓存，故障解除后可重新选块发起 FLUSH。</div>
       </div>
     </div>
 
@@ -175,10 +211,15 @@ function render(state) {
   state.blocks.forEach(b => {
     const div = document.createElement("div");
     div.className = `block ${b.location}${b.dirty ? " dirty" : ""}${selected.has(b.block) ? " selected" : ""}`;
+    if (b.failed) div.classList.add("failed");
+    if (b.undo_pending) div.classList.add("undo");
     if (f.status === "running" && f.selected[f.cursor] === b.block) {
       div.classList.add("flushing");
     }
-    div.innerHTML = `<div class="idx">${b.block}</div><div class="meta">${b.location}${b.cache_seq ? " #"+b.cache_seq : (b.platter_seq ? " #"+b.platter_seq : "")}</div>`;
+    const outcome = f.results && f.results[b.block];
+    const outcomeTag = outcome ? `｜${outcome}` : "";
+    const undoTag = b.undo_pending ? "<br>镜像已撕，原值在 undo" : "";
+    div.innerHTML = `<div class="idx">${b.block}</div><div class="meta">${b.location}${b.cache_seq ? " #"+b.cache_seq : (b.platter_seq ? " #"+b.platter_seq : "")}${outcomeTag}${undoTag}</div>`;
     div.onclick = () => {
       if (flushActive) return;
       selected.has(b.block) ? selected.delete(b.block) : selected.add(b.block);
@@ -196,9 +237,30 @@ function render(state) {
   document.getElementById("bar").style.width = total ? Math.round(cursor / total * 100) + "%" : "0%";
   document.getElementById("progressText").textContent =
     total ? `进度 ${cursor}/${total}` : "未开始";
+  const failedLine = document.getElementById("failedLine");
+  const failedBlock = state.blocks.find(b => b.failed);
+  if (f.status === "failed" && failedBlock) {
+    const outcome = f.results[f.failed_block] || "failed";
+    failedLine.textContent =
+      `本轮在块 ${f.failed_block} 结束（${outcome}）：${f.error || ""} ` +
+      `已处理 ${f.cursor}/${f.total}；该块与未刷块仍是最新缓存的脏块，故障解除后可重选再刷。`;
+  } else {
+    failedLine.textContent = "";
+  }
   document.getElementById("btnFlush").disabled = flushActive || selected.size === 0;
   document.getElementById("btnPause").disabled = f.status !== "running";
   document.getElementById("btnResume").disabled = f.status !== "paused";
+  const faults = state.fault && state.fault.short_write ? state.fault.short_write : {};
+  const faultEntries = Object.entries(faults);
+  document.getElementById("faultLine").textContent = faultEntries.length
+    ? "已布置短写: " + faultEntries.map(([b, v]) =>
+        `块 ${b} 只写 ${v.bytes} 字节${v.persistent ? "（持续）" : "（一次性）"}`).join("；")
+    : "";
+  const ia = state.io || {};
+  if (ia.read_bytes !== undefined) {
+    document.getElementById("ioLine").textContent =
+      `累计镜像/日志 I/O：读 ${ia.read_bytes} B，写 ${ia.write_bytes} B（单块写回的额外读写与镜像容量无关）`;
+  }
 
   const ev = document.getElementById("events");
   ev.innerHTML = state.events.slice().reverse().map(e =>
@@ -237,8 +299,26 @@ document.getElementById("btnRead").onclick = async () => {
 document.getElementById("btnFlush").onclick = async () => {
   try {
     const json = await call("/api/flush", {selected: [...selected]});
+    // After a failed round, pre-select what still needs flushing so a retry
+    // (once the fault is cleared) is one click away.
+    if (json.state.flush.status === "failed") {
+      selected = new Set(json.state.blocks.filter(b => b.dirty).map(b => b.block));
+    }
     render(json.state);
   } catch (e) { showErr(e); }
+};
+document.getElementById("btnArmFault").onclick = async () => {
+  try {
+    const body = {
+      block: parseInt(document.getElementById("faultBlk").value, 10),
+      bytes: parseInt(document.getElementById("faultBytes").value, 10),
+      persistent: document.getElementById("faultPersist").checked,
+    };
+    render((await call("/api/fault/short-write", body)).state);
+  } catch (e) { showErr(e); }
+};
+document.getElementById("btnClearFault").onclick = async () => {
+  try { render((await call("/api/fault/clear", {})).state); } catch (e) { showErr(e); }
 };
 document.getElementById("btnPause").onclick = async () => {
   try { render((await call("/api/flush/pause", {})).state); } catch (e) { showErr(e); }
