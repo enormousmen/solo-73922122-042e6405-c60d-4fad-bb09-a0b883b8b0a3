@@ -1,0 +1,18 @@
+services:
+  wbcache:
+    build: .
+    image: wbcache-demo:latest
+    container_name: wbcache-demo
+    ports:
+      - "8000:8000"
+    environment:
+      IMAGE_PATH: /data/disk.img
+      BLOCK_COUNT: "32"
+      # seconds between block persist steps inside one FLUSH round
+      FLUSH_DELAY: "0.6"
+    volumes:
+      - diskimg:/data
+    restart: unless-stopped
+
+volumes:
+  diskimg:

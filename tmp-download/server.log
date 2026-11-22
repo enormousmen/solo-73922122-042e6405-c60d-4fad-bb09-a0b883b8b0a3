@@ -1,0 +1,46 @@
+ * Serving Flask app 'server'
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8000
+ * Running on http://172.17.0.4:8000
+[33mPress CTRL+C to quit[0m
+127.0.0.1 - - [22/Nov/2026 09:13:56] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:13:56] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:09] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:09] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:09] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:09] "GET /api/read?block=0 HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:28] "POST /api/flush HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:28] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:29] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:30] "GET /api/read?block=1 HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "POST /api/flush HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "POST /api/flush/pause HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:53] "POST /api/flush/resume HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:55] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:14:55] "GET /api/read?block=4 HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:14] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:14] "POST /api/flush HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:14] "GET /api/state HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:15] "POST /api/power-loss HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:15] "GET /api/read?block=0 HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:15] "GET /api/read?block=3 HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:15] "GET /api/read?block=4 HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:15] "GET /api/read?block=5 HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:15] "[31m[1mPOST /api/flush/resume HTTP/1.1[0m" 409 -
+127.0.0.1 - - [22/Nov/2026 09:15:15] "POST /api/write HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:15] "POST /api/flush HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:16] "GET /api/read?block=6 HTTP/1.1" 200 -
+127.0.0.1 - - [22/Nov/2026 09:15:33] "[31m[1mPOST /api/write HTTP/1.1[0m" 400 -
+127.0.0.1 - - [22/Nov/2026 09:15:33] "[31m[1mPOST /api/write HTTP/1.1[0m" 400 -
+127.0.0.1 - - [22/Nov/2026 09:15:33] "[31m[1mPOST /api/flush HTTP/1.1[0m" 400 -
+127.0.0.1 - - [22/Nov/2026 09:15:40] "[31m[1mPOST /api/flush/pause HTTP/1.1[0m" 409 -
+127.0.0.1 - - [22/Nov/2026 09:16:05] "GET /api/state HTTP/1.1" 200 -

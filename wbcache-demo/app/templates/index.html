@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>单盘写回缓存演练 · Write-Back Cache Lab</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #181f2e; --line: #2a3550; --text: #dbe4f3;
+    --muted: #8a97b1; --accent: #4f8cff; --ok: #37c26b; --warn: #f0a93b;
+    --danger: #ef5f67; --cache: #f0a93b; --platter: #37c26b; --image: #6b7894;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { padding: 18px 24px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0 0 4px; font-size: 20px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  .layout { display: grid; grid-template-columns: 1fr 360px; gap: 16px; padding: 16px 24px; }
+  @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 10px; font-size: 15px; color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; }
+  .block { border: 1px solid var(--line); border-radius: 8px; padding: 6px 4px; text-align: center;
+    cursor: pointer; user-select: none; position: relative; background: #121929; transition: border-color .15s; }
+  .block:hover { border-color: var(--accent); }
+  .block .idx { font-weight: 600; font-size: 13px; }
+  .block .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .block.image { border-left: 3px solid var(--image); }
+  .block.platter { border-left: 3px solid var(--platter); }
+  .block.cache { border-left: 3px solid var(--cache); }
+  .block.dirty .idx::after { content: " ●"; color: var(--danger); }
+  .block.selected { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .block.flushing { animation: pulse 0.9s infinite; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(79,140,255,.5);} 50% { box-shadow: 0 0 0 5px rgba(79,140,255,0);} }
+  .legend { display: flex; gap: 16px; margin-top: 10px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .legend span::before { content: "■"; margin-right: 4px; }
+  .lg-image::before { color: var(--image);} .lg-platter::before { color: var(--platter);} .lg-cache::before { color: var(--cache);}
+  .lg-dirty::before { color: var(--danger); }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input[type=number], input[type=text], select, textarea {
+    width: 100%; background: #101725; border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 7px 9px; font-size: 13px; }
+  textarea { min-height: 60px; resize: vertical; font-family: ui-monospace, monospace; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .checks { display: flex; gap: 14px; margin: 8px 0; }
+  .checks label { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--text); font-size: 13px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 8px 12px;
+    font-size: 13px; cursor: pointer; margin-top: 8px; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.ghost { background: #24304a; }
+  button.danger { background: var(--danger); }
+  button.warn { background: var(--warn); color: #1a1a1a; }
+  .progress { height: 8px; background: #101725; border-radius: 4px; overflow: hidden; margin: 10px 0 6px; }
+  .progress > div { height: 100%; background: var(--ok); transition: width .3s; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 12px; }
+  .badge.running { background: #1d3a6b; color: #9ec1ff; }
+  .badge.paused { background: #5a4318; color: #ffd48a; }
+  .badge.done { background: #14452a; color: #86ecad; }
+  .badge.aborted { background: #4d1c20; color: #ffa8ad; }
+  .badge.idle { background: #26304a; color: var(--muted); }
+  #events { max-height: 340px; overflow-y: auto; font-family: ui-monospace, "Menlo", monospace; font-size: 12px; }
+  .ev { padding: 3px 0; border-bottom: 1px dashed #232d44; color: var(--muted); }
+  .ev b { color: var(--text); font-weight: 600; }
+  .ev.kind-persist { color: var(--ok); } .ev.kind-powerloss { color: var(--danger); }
+  .ev.kind-flush-accept, .ev.kind-flush-done { color: #9ec1ff; }
+  .ev.kind-flush-skip-stale { color: var(--warn); }
+  .readout { background: #101725; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+    font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; margin-top: 8px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .sel-line { font-size: 12px; color: var(--muted); margin: 6px 0; min-height: 18px; word-break: break-all; }
+  .hint { font-size: 12px; color: var(--muted); }
+  .hint code { color: var(--warn); }
+  .err { color: var(--danger); font-size: 12px; min-height: 16px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>单盘写回缓存演练（4 KiB 整块读写）</h1>
+  <p>普通写入先进内存缓存即应答；FLUSH 每轮只跑一次、可暂停；暂停期间可继续读写、可发 FUA；模拟掉电清空缓存并作废未完成 FLUSH，再从本地镜像读盘。块大小 {{ block_size }} 字节，共 {{ block_count }} 块。</p>
+</header>
+
+<div class="layout">
+  <div>
+    <div class="panel">
+      <h2>① 块视图（点击块加入/移出 FLUSH 待刷集合）</h2>
+      <div class="grid" id="grid"></div>
+      <div class="legend">
+        <span class="lg-image">镜像初值（未写过）</span>
+        <span class="lg-platter">已落盘（platter）</span>
+        <span class="lg-cache">最新值在缓存</span>
+        <span class="lg-dirty">脏块（缓存比盘新）</span>
+      </div>
+      <div class="sel-line" id="selLine"></div>
+      <button class="ghost" id="btnDirty">全选脏块</button>
+      <button class="ghost" id="btnClearSel">清空选择</button>
+    </div>
+
+    <div class="panel">
+      <h2>② 读写操作</h2>
+      <div class="row">
+        <div>
+          <label>块号</label>
+          <input type="number" id="blk" min="0" max="{{ block_count - 1 }}" value="0">
+        </div>
+        <div style="flex:2">
+          <label>写入内容（不足 4096 字节时勾选零填充）</label>
+          <input type="text" id="wdata" placeholder="例如 HELLO-v1">
+        </div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="pad" checked> 零填充到 4 KiB</label>
+        <label><input type="checkbox" id="fua"> FUA（该块落盘后才应答）</label>
+      </div>
+      <div class="row">
+        <button id="btnWrite">写入（整块 4 KiB）</button>
+        <button class="ghost" id="btnRead">读该块</button>
+      </div>
+      <div class="err" id="ioErr"></div>
+      <div class="readout" id="readout" style="display:none"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>③ FLUSH（一轮）</h2>
+      <div>状态：<span class="badge idle" id="flushBadge">idle</span> <span class="muted" id="flushSeq"></span></div>
+      <div class="progress"><div id="bar" style="width:0%"></div></div>
+      <div class="muted" id="progressText">未开始</div>
+      <div class="row">
+        <button id="btnFlush">发起 FLUSH</button>
+        <button class="warn" id="btnPause" disabled>暂停</button>
+        <button class="ghost" id="btnResume" disabled>恢复</button>
+      </div>
+      <div class="hint" style="margin-top:8px">
+        受理时快照待刷块；受理后到达的普通写入不随本轮落盘。暂停期间发 <code>FUA</code> 可把指定块直接落盘，恢复时旧快照不会覆盖它。
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>④ 电源 / 复位</h2>
+      <button class="danger" id="btnPower">模拟掉电</button>
+      <button class="ghost" id="btnReset">复位（重建镜像）</button>
+      <div class="hint" style="margin-top:8px">掉电：清空缓存、作废未完成 FLUSH，之后读盘只反映镜像里已落盘的内容。</div>
+    </div>
+
+    <div class="panel">
+      <h2>⑤ 事件日志</h2>
+      <div id="events"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BLOCK_COUNT = {{ block_count }};
+let selected = new Set();
+let lastState = null;
+
+async function call(url, body) {
+  const opts = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
+  const resp = await fetch(url, opts);
+  const json = await resp.json();
+  if (!resp.ok) throw new Error(json.detail || resp.statusText);
+  return json;
+}
+function showErr(e) { document.getElementById("ioErr").textContent = e.message; setTimeout(() => document.getElementById("ioErr").textContent = "", 4000); }
+
+function render(state) {
+  lastState = state;
+  const f = state.flush;
+  const flushActive = ["running", "paused"].includes(f.status);
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  state.blocks.forEach(b => {
+    const div = document.createElement("div");
+    div.className = `block ${b.location}${b.dirty ? " dirty" : ""}${selected.has(b.block) ? " selected" : ""}`;
+    if (f.status === "running" && f.selected[f.cursor] === b.block) {
+      div.classList.add("flushing");
+    }
+    div.innerHTML = `<div class="idx">${b.block}</div><div class="meta">${b.location}${b.cache_seq ? " #"+b.cache_seq : (b.platter_seq ? " #"+b.platter_seq : "")}</div>`;
+    div.onclick = () => {
+      if (flushActive) return;
+      selected.has(b.block) ? selected.delete(b.block) : selected.add(b.block);
+      render(state);
+    };
+    grid.appendChild(div);
+  });
+  document.getElementById("selLine").textContent =
+    selected.size ? `待刷块（${selected.size}）: ${[...selected].sort((a,b)=>a-b).join(", ")}` : "未选择块（点击上方块格选择）";
+
+  const badge = document.getElementById("flushBadge");
+  badge.textContent = f.status; badge.className = "badge " + f.status;
+  document.getElementById("flushSeq").textContent = f.seq ? `FLUSH #${f.seq}` : "";
+  const total = f.total || 0, cursor = f.cursor || 0;
+  document.getElementById("bar").style.width = total ? Math.round(cursor / total * 100) + "%" : "0%";
+  document.getElementById("progressText").textContent =
+    total ? `进度 ${cursor}/${total}` : "未开始";
+  document.getElementById("btnFlush").disabled = flushActive || selected.size === 0;
+  document.getElementById("btnPause").disabled = f.status !== "running";
+  document.getElementById("btnResume").disabled = f.status !== "paused";
+
+  const ev = document.getElementById("events");
+  ev.innerHTML = state.events.slice().reverse().map(e =>
+    `<div class="ev kind-${e.kind.replace(/\./g, "-")}"><b>[${e.kind}]</b> ${e.detail}</div>`).join("");
+}
+
+document.getElementById("btnDirty").onclick = () => {
+  if (!lastState) return;
+  selected = new Set(lastState.blocks.filter(b => b.dirty).map(b => b.block));
+  render(lastState);
+};
+document.getElementById("btnClearSel").onclick = () => { selected.clear(); render(lastState); };
+
+document.getElementById("btnWrite").onclick = async () => {
+  try {
+    const body = {
+      block: parseInt(document.getElementById("blk").value, 10),
+      data: document.getElementById("wdata").value,
+      pad: document.getElementById("pad").checked,
+      fua: document.getElementById("fua").checked,
+    };
+    const json = await call("/api/write", body);
+    render(json.state);
+  } catch (e) { showErr(e); }
+};
+document.getElementById("btnRead").onclick = async () => {
+  try {
+    const block = parseInt(document.getElementById("blk").value, 10);
+    const json = await call(`/api/read?block=${block}`);
+    const r = json.result;
+    const el = document.getElementById("readout");
+    el.style.display = "block";
+    el.innerHTML = `块 ${r.block}｜来源: <b>${r.source}</b>｜版本 seq: ${r.seq ?? "-"}<br>预览: ${r.preview}<br><span class="muted">hex 前 64 字节: ${r.data_hex.slice(0, 128)}${r.data_hex.length > 128 ? "…" : ""}</span>`;
+  } catch (e) { showErr(e); }
+};
+document.getElementById("btnFlush").onclick = async () => {
+  try {
+    const json = await call("/api/flush", {selected: [...selected]});
+    render(json.state);
+  } catch (e) { showErr(e); }
+};
+document.getElementById("btnPause").onclick = async () => {
+  try { render((await call("/api/flush/pause", {})).state); } catch (e) { showErr(e); }
+};
+document.getElementById("btnResume").onclick = async () => {
+  try { render((await call("/api/flush/resume", {})).state); } catch (e) { showErr(e); }
+};
+document.getElementById("btnPower").onclick = async () => {
+  if (!confirm("确认模拟掉电？缓存将被清空，未完成的 FLUSH 作废。")) return;
+  try { selected.clear(); render((await call("/api/power-loss", {})).state); } catch (e) { showErr(e); }
+};
+document.getElementById("btnReset").onclick = async () => {
+  if (!confirm("确认复位？将重建镜像并清空全部状态。")) return;
+  try { selected.clear(); render((await call("/api/reset", {})).state); } catch (e) { showErr(e); }
+};
+
+setInterval(async () => {
+  try { render(await (await fetch("/api/state")).json()); } catch (e) {}
+}, 700);
+call("/api/state").then(render).catch(showErr);
+</script>
+</body>
+</html>
